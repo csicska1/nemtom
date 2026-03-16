@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS:GO Mini-Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 16px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #winMessage {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 48px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            display: none;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">
+        <div>Health: <span id="health">100</span></div>
+        <div>Ammo: <span id="ammo">30</span></div>
+        <div>Money: <span id="money">800</span></div>
+        <div>Time: <span id="timer">60</span></div>
+    </div>
+    <div id="winMessage"></div>
+    <div id="instructions">
+        <strong>Controls:</strong><br>
+        WASD: Move<br>
+        Mouse: Look<br>
+        Space: Jump<br>
+        Shift: Run<br>
+        Left Click: Shoot<br>
+        Right Click: Aim Down Sights<br>
+        Click canvas to lock mouse for FPS controls.
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Game constants
+        const MAP_SIZE = 50;
+        const WALL_HEIGHT = 10;
+        const PLAYER_HEIGHT = 5;
+        const GRAVITY = -0.01;
+        const JUMP_FORCE = 0.3;
+        const MOVE_SPEED = 0.1;
+        const RUN_SPEED = 0.2;
+        const MOUSE_SENSITIVITY = 0.002;
+        const ROUND_TIME = 60; // seconds
+        const BOT_COUNT = 4; // per team
+        const MAX_HEALTH = 100;
+        const RIFLE_DAMAGE = 25; // body shots, headshot instant kill
+        const PISTOL_DAMAGE = 50;
+        const KNIFE_DAMAGE = 100;
+
+        // Game state
+        let scene, camera, renderer, controls;
+        let clock = new THREE.Clock();
+        let keys = {};
+        let mouse = { x: 0, y: 0 };
+        let isAiming = false;
+        let isRunning = false;
+        let velocity = new THREE.Vector3();
+        let onGround = true;
+        let health = MAX_HEALTH;
+        let ammo = 30;
+        let money = 800;
+        let timer = ROUND_TIME;
+        let roundActive = true;
+        let winMessage = '';
+        let bots = [];
+        let bomb = null;
+        let bombPlanted = false;
+        let bombTimer = 0;
+        let playerTeam = 'CT'; // or 'T'
+        let enemies = [];
+
+        // Audio context for sounds
+        let audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+        // Initialize game
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, PLAYER_HEIGHT, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gameCanvas') });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            // Controls
+            controls = new THREE.PointerLockControls(camera, document.body);
+            document.addEventListener('click', () => controls.lock());
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 10, 5);
+            scene.add(directionalLight);
+
+            // Map creation
+            createMap();
+
+            // Bots
+            createBots();
+
+            // Bomb
+            createBomb();
+
+            // Event listeners
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mouseup', onMouseUp);
+            document.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('resize', onWindowResize);
+
+            // Start game loop
+            animate();
+        }
+
+        // Create simple map
+        function createMap() {
+            const wallMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+            const floorMaterial = new THREE.MeshLambertMaterial({ color: 0x696969 });
+
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(MAP_SIZE, MAP_SIZE);
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+
+            // Walls - simple box layout
+            const wallGeometry = new THREE.BoxGeometry(1, WALL_HEIGHT, 1);
+
+            // Outer walls
+            for (let x = -MAP_SIZE/2; x <= MAP_SIZE/2; x++) {
+                addWall(x, WALL_HEIGHT/2, -MAP_SIZE/2, wallMaterial, wallGeometry);
+                addWall(x, WALL_HEIGHT/2, MAP_SIZE/2, wallMaterial, wallGeometry);
+            }
+            for (let z = -MAP_SIZE/2; z <= MAP_SIZE/2; z++) {
+                addWall(-MAP_SIZE/2, WALL_HEIGHT/2, z, wallMaterial, wallGeometry);
+                addWall(MAP_SIZE/2, WALL_HEIGHT/2, z, wallMaterial, wallGeometry);
+            }
+
+            // Inner rooms
+            for (let x = -10; x <= 10; x++) {
+                addWall(x, WALL_HEIGHT/2, 0, wallMaterial, wallGeometry);
+            }
+            for (let z = -10; z <= 10; z++) {
+                addWall(0, WALL_HEIGHT/2, z, wallMaterial, wallGeometry);
+            }
+
+            // Bomb site (central area)
+            // Already open due to cross
+        }
+
+        function addWall(x, y, z, material, geometry) {
+            const wall = new THREE.Mesh(geometry, material);
+            wall.position.set(x, y, z);
+            scene.add(wall);
+        }
+
+        // Create bots
+        function createBots() {
+            for (let i = 0; i < BOT_COUNT; i++) {
+                const bot = {
+                    mesh: new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshLambertMaterial({ color: playerTeam === 'CT' ? 0x0000FF : 0xFF0000 })),
+                    position: new THREE.Vector3((Math.random() - 0.5) * 20, 1, (Math.random() - 0.5) * 20),
+                    velocity: new THREE.Vector3(),
+                    health: MAX_HEALTH,
+                    team: playerTeam === 'CT' ? 'T' : 'CT',
+                    state: 'patrol', // patrol, chase, shoot
+                    target: null,
+                    lastShot: 0
+                };
+                bot.mesh.position.copy(bot.position);
+                bot.mesh.userData.isBot = true;
+                bot.mesh.userData.bot = bot;
+                scene.add(bot.mesh);
+                bots.push(bot);
+                enemies.push(bot);
+            }
+        }
+
+        // Create bomb
+        function createBomb() {
+            bomb = {
+                mesh: new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshLambertMaterial({ color: 0xFFFF00 })),
+                position: new THREE.Vector3(0, 1, 0),
+                planted: false,
+                timer: 0
+            };
+            bomb.mesh.position.copy(bomb.position);
+            scene.add(bomb.mesh);
+        }
+
+        // Input handlers
+        function onKeyDown(event) {
+            keys[event.code] = true;
+            if (event.code === 'ShiftLeft') isRunning = true;
+        }
+
+        function onKeyUp(event) {
+            keys[event.code] = false;
+            if (event.code === 'ShiftLeft') isRunning = false;
+        }
+
+        function onMouseDown(event) {
+            if (event.button === 0) { // Left click
+                shoot();
+            } else if (event.button === 2) { // Right click
+                isAiming = true;
+                camera.fov = 60; // Narrow FOV for ADS
+                camera.updateProjectionMatrix();
+            }
+        }
+
+        function onMouseUp(event) {
+            if (event.button === 2) {
+                isAiming = false;
+                camera.fov = 75;
+                camera.updateProjectionMatrix();
+            }
+        }
+
+        function onMouseMove(event) {
+            if (controls.isLocked) {
+                const movementX = event.movementX || 0;
+                const movementY = event.movementY || 0;
+                controls.getObject().rotation.y -= movementX * MOUSE_SENSITIVITY;
+                controls.getObject().rotation.x -= movementY * MOUSE_SENSITIVITY;
+                controls.getObject().rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, controls.getObject().rotation.x));
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Shooting
+        function shoot() {
+            if (ammo <= 0) return;
+            ammo--;
+
+            // Raycast from camera
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(scene.children);
+
+            for (let intersect of intersects) {
+                if (intersect.object.userData.isBot) {
+                    const bot = intersect.object.userData.bot;
+                    if (bot.team !== playerTeam) {
+                        // Check for headshot (simplified)
+                        const hitPoint = intersect.point;
+                        const headY = bot.position.y + 1.5;
+                        if (Math.abs(hitPoint.y - headY) < 0.5) {
+                            bot.health = 0; // Instant kill
+                        } else {
+                            bot.health -= RIFLE_DAMAGE;
+                        }
+                        if (bot.health <= 0) {
+                            bot.mesh.visible = false;
+                            enemies.splice(enemies.indexOf(bot), 1);
+                        }
+                        playSound(440, 0.1); // Hit sound
+                        break;
+                    }
+                }
+            }
+
+            playSound(800, 0.05); // Gunshot sound
+            updateHUD();
+        }
+
+        // Sound function
+        function playSound(frequency, duration) {
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+            gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + duration);
+        }
+
+        // Bot AI
+        function updateBots(delta) {
+            for (let bot of bots) {
+                if (bot.health <= 0) continue;
+
+                const distanceToPlayer = bot.position.distanceTo(camera.position);
+                if (distanceToPlayer < 15) { // Chase range
+                    bot.state = 'chase';
+                    bot.target = camera.position.clone();
+                } else {
+                    bot.state = 'patrol';
+                    // Simple patrol: move randomly
+                    if (Math.random() < 0.01) {
+                        bot.velocity.x = (Math.random() - 0.5) * 0.05;
+                        bot.velocity.z = (Math.random() - 0.5) * 0.05;
+                    }
+                }
+
+                if (bot.state === 'chase') {
+                    const direction = bot.target.clone().sub(bot.position).normalize();
+                    bot.velocity.x = direction.x * 0.03;
+                    bot.velocity.z = direction.z * 0.03;
+                }
+
+                // Move bot
+                bot.position.add(bot.velocity);
+                bot.mesh.position.copy(bot.position);
+
+                // Shooting
+                if (bot.state === 'chase' && distanceToPlayer < 10 && clock.elapsedTime - bot.lastShot > 1) {
+                    bot.lastShot = clock.elapsedTime;
+                    // Simple shoot at player
+                    if (Math.random() < 0.5) { // 50% accuracy
+                        health -= RIFLE_DAMAGE;
+                        playSound(600, 0.1);
+                        updateHUD();
+                    }
+                }
+            }
+        }
+
+        // Bomb logic
+        function updateBomb(delta) {
+            if (bombPlanted) {
+                bombTimer -= delta;
+                if (bombTimer <= 0) {
+                    // Bomb explodes, T win
+                    endRound('T Win');
+                }
+            } else if (playerTeam === 'T' && camera.position.distanceTo(bomb.position) < 2) {
+                // Plant bomb
+                bombPlanted = true;
+                bombTimer = 10; // 10 seconds to explode
+                bomb.mesh.material.color.setHex(0xFF0000);
+            }
+        }
+
+        // Movement
+        function updateMovement(delta) {
+            velocity.x = 0;
+            velocity.z = 0;
+
+            const speed = isRunning ? RUN_SPEED : MOVE_SPEED;
+            if (keys['KeyW']) velocity.z -= speed;
+            if (keys['KeyS']) velocity.z += speed;
+            if (keys['KeyA']) velocity.x -= speed;
+            if (keys['KeyD']) velocity.x += speed;
+
+            // Apply movement relative to camera direction
+            const direction = new THREE.Vector3();
+            controls.getDirection(direction);
+            direction.y = 0;
+            direction.normalize();
+            const right = new THREE.Vector3().crossVectors(direction, camera.up).normalize();
+
+            const moveVector = new THREE.Vector3();
+            moveVector.addScaledVector(direction, -velocity.z);
+            moveVector.addScaledVector(right, velocity.x);
+
+            camera.position.add(moveVector);
+
+            // Gravity and jump
+            if (keys['Space'] && onGround) {
+                velocity.y = JUMP_FORCE;
+                onGround = false;
+            }
+            velocity.y += GRAVITY;
+            camera.position.y += velocity.y;
+
+            // Ground collision
+            if (camera.position.y <= PLAYER_HEIGHT) {
+                camera.position.y = PLAYER_HEIGHT;
+                velocity.y = 0;
+                onGround = true;
+            }
+
+            // Simple wall collision (AABB)
+            if (camera.position.x < -MAP_SIZE/2 + 1) camera.position.x = -MAP_SIZE/2 + 1;
+            if (camera.position.x > MAP_SIZE/2 - 1) camera.position.x = MAP_SIZE/2 - 1;
+            if (camera.position.z < -MAP_SIZE/2 + 1) camera.position.z = -MAP_SIZE/2 + 1;
+            if (camera.position.z > MAP_SIZE/2 - 1) camera.position.z = MAP_SIZE/2 - 1;
+        }
+
+        // HUD update
+        function updateHUD() {
+            document.getElementById('health').textContent = health;
+            document.getElementById('ammo').textContent = ammo;
+            document.getElementById('money').textContent = money;
+            document.getElementById('timer').textContent = Math.ceil(timer);
+        }
+
+        // Round logic
+        function updateRound(delta) {
+            if (!roundActive) return;
+
+            timer -= delta;
+            if (timer <= 0 || enemies.length === 0 || health <= 0) {
+                if (enemies.length === 0) {
+                    endRound(playerTeam === 'CT' ? 'CT Win' : 'T Win');
+                } else if (health <= 0) {
+                    endRound(playerTeam === 'CT' ? 'T Win' : 'CT Win');
+                } else {
+                    endRound('Time Up - ' + (playerTeam === 'CT' ? 'T Win' : 'CT Win'));
+                }
+            }
+        }
+
+        // End round
+        function endRound(message) {
+            roundActive = false;
+            winMessage = message;
+            document.getElementById('winMessage').textContent = message;
+            document.getElementById('winMessage').style.display = 'block';
+
+            setTimeout(() => {
+                // Restart round
+                resetGame();
+            }, 3000);
+        }
+
+        // Reset game
+        function resetGame() {
+            health = MAX_HEALTH;
+            ammo = 30;
+            timer = ROUND_TIME;
+            roundActive = true;
+            bombPlanted = false;
+            bombTimer = 0;
+            bomb.mesh.material.color.setHex(0xFFFF00);
+            document.getElementById('winMessage').style.display = 'none';
+
+            // Reset bots
+            for (let bot of bots) {
+                bot.health = MAX_HEALTH;
+                bot.position.set((Math.random() - 0.5) * 20, 1, (Math.random() - 0.5) * 20);
+                bot.mesh.position.copy(bot.position);
+                bot.mesh.visible = true;
+            }
+            enemies = bots.filter(bot => bot.team !== playerTeam);
+
+            updateHUD();
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+
+            if (roundActive) {
+                updateMovement(delta);
+                updateBots(delta);
+                updateBomb(delta);
+            }
+
+            updateRound(delta);
+
+            renderer.render(scene, camera);
+        }
+
+        // Start the game
+        init();
+    </script>
+</body>
+</html>
